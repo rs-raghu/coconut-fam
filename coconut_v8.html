@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Coconut V14 - Real-Time</title>
+    <style>
+        :root { --primary: #2e7d32; --panel: #f5f5f5; --accent: #ff9800; --edit: #2196f3; --select: #00bcd4; }
+        body { font-family: 'Segoe UI', sans-serif; margin: 0; display: flex; height: 100vh; background: #222; overflow: hidden; color: #333; }
+        
+        #controls {
+            width: 330px; background: var(--panel); padding: 15px; box-shadow: 2px 0 20px rgba(0,0,0,0.5);
+            display: flex; flex-direction: column; gap: 10px; overflow-y: auto; z-index: 100;
+        }
+        h2 { margin: 0; color: var(--primary); font-size: 1.2rem; }
+        
+        button { padding: 8px; cursor: pointer; border: 1px solid #ccc; border-radius: 5px; background: #fff; font-weight: 600; font-size: 0.85rem; }
+        button:hover { background: #eee; }
+        button.active { background: var(--primary); color: white; border-color: var(--primary); }
+        button.highlight { background: var(--accent); color: white; border: none; }
+        button.edit-mode { background: var(--edit); color: white; border-color: #1976d2; }
+        
+        .row { display: flex; gap: 8px; }
+        input, select { width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+        label { font-size: 0.7rem; font-weight: bold; color: #666; display: block; margin-bottom: 2px; }
+
+        #canvas-wrapper { flex-grow: 1; position: relative; background: #333; cursor: grab; }
+        canvas { display: block; }
+        
+        #toast {
+            position: absolute; top: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.8); color: white; padding: 8px 16px; border-radius: 20px;
+            font-size: 0.85rem; opacity: 0; transition: opacity 0.3s; pointer-events: none;
+        }
+
+        .toggle-container { display:flex; flex-direction: column; gap: 5px; background:#e3f2fd; padding:10px; border-radius:6px; border:1px solid #bbdefb; }
+        .edit-controls { display:flex; gap:5px; margin-top:5px; }
+    </style>
+</head>
+<body>
+
+<div id="controls">
+    <h2>Coconut V14 <span style="font-size:0.7rem; color:#666;">REAL-TIME</span></h2>
+
+    <div>
+        <label>1. MAP & SCALE</label>
+        <div class="row">
+            <button onclick="document.getElementById('fileInput').click()">📁 Map</button>
+            <button id="btnCal" onclick="setMode('calibrate')">📏 Calibrate</button>
+        </div>
+        <input type="file" id="fileInput" accept="image/*" style="display:none">
+        <div id="calStatus" style="font-size:0.7rem; color:#666; margin-top:2px;">Scale: 1px = 1ft (Default)</div>
+    </div>
+
+    <div>
+        <label>2. BOUNDARIES</label>
+        <div class="row">
+            <button id="btnLand" onclick="setMode('land')">Draw Land</button>
+            <button id="btnObs" onclick="setMode('obstacle')">Obstacle</button>
+        </div>
+        <div class="row" style="margin-top:5px;">
+            <button onclick="undo()">↶ Undo</button>
+            <button onclick="resetAll()" style="color:#d32f2f;">✖ Clear</button>
+        </div>
+    </div>
+
+    <div style="border-top:1px solid #ddd; padding-top:10px;">
+        <label>3. GENERATOR</label>
+        <select id="pattern" onchange="toggleRectInputs()">
+            <option value="sq">Square Grid</option>
+            <option value="rect">Rectangular (Custom X/Y)</option>
+            <option value="tri">Triangular (Hexagonal)</option>
+        </select>
+        
+        <div class="row" style="margin-top:8px;" id="sqInput">
+            <div style="flex:1"><label>Spacing (ft)</label><input type="number" id="optDist" value="25"></div>
+        </div>
+        <div class="row" style="margin-top:8px; display:none;" id="rectInput">
+            <div style="flex:1"><label>Plant X (ft)</label><input type="number" id="distX" value="20"></div>
+            <div style="flex:1"><label>Row Y (ft)</label><input type="number" id="distY" value="30"></div>
+        </div>
+
+        <div style="margin-top:5px;"><label>Border Gap (ft)</label><input type="number" id="borderDist" value="5"></div>
+
+        <label style="margin-top:8px;">Flexibility: <span id="flexVal">0 ft</span></label>
+        <input type="range" min="0" max="10" step="0.5" value="0" oninput="updateFlex(this.value)">
+
+        <label>Rotation: <span id="rotVal">0°</span></label>
+        <input type="range" id="angleSlider" min="0" max="180" value="0" oninput="updateRot(this.value)">
+        <button class="highlight" style="width:100%; margin-top:5px;" onclick="autoAlign()">✨ Auto-Align</button>
+        
+        <button class="active" style="width:100%; margin-top:10px; padding:10px;" onclick="runOptimizer()">🚀 GENERATE LAYOUT</button>
+    </div>
+
+    <div style="border-top:2px solid #2196f3; padding-top:10px; margin-top:10px;">
+        <div class="toggle-container">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div style="font-weight:bold; color:#1565c0; font-size:0.9rem;">🛠️ EDIT MODE</div>
+                <button id="btnEdit" onclick="toggleEditMode()" style="padding:4px 12px;">OFF</button>
+            </div>
+            
+            <div id="editTools" style="display:none; flex-direction:column; gap:5px;">
+                <div class="edit-controls">
+                    <button id="btnBoxSel" onclick="setMode('boxselect')" title="Box Select">⛶ Box</button>
+                    <button onclick="selectAll()">Select All</button>
+                    <button onclick="deselectAll()">None</button>
+                </div>
+                <div style="font-size:0.65rem; color:#666; line-height:1.3;">
+                    • <b>Shift+Click</b> Multi-select<br>
+                    • <b>Drag</b> to move group<br>
+                    • <b>Dbl-Click</b> Add/Delete
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div style="margin-top:auto; text-align:center;">
+        <div style="font-size:2rem; font-weight:bold; color:var(--primary);" id="treeCount">0</div>
+        <div style="font-size:0.8rem; color:#666;">TREES</div>
+    </div>
+</div>
+
+<div id="canvas-wrapper">
+    <div id="toast">Notification</div>
+    <canvas id="c"></canvas>
+</div>
+
+<script>
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    const wrapper = document.getElementById('canvas-wrapper');
+
+    let mode = 'pan'; 
+    let view = { s: 1, x: 0, y: 0 }; 
+    let isDrag = false, startPos = {x:0, y:0};
+    let dragStartWorld = {x:0, y:0};
+    
+    let bgImg = null, pxPerFt = 1.0;
+    let landPoly = [], obstacles = [], activePoly = [], trees = [];
+    let config = { angle: 0, flex: 0 };
+    
+    let hoveredTree = null, mouseWorld = {x:0, y:0}, isEditing = false;
+    let selectionBox = null;
+
+    // INIT
+    function resize() { canvas.width = wrapper.clientWidth; canvas.height = wrapper.clientHeight; render(); }
+    window.addEventListener('resize', resize); window.onload = resize;
+
+    // --- LOGIC: UI UPDATES ---
+    function toggleRectInputs() {
+        const p = document.getElementById('pattern').value;
+        document.getElementById('sqInput').style.display = (p==='rect') ? 'none' : 'flex';
+        document.getElementById('rectInput').style.display = (p==='rect') ? 'flex' : 'none';
+        runOptimizer(); // Auto-update on pattern change
+    }
+
+    function updateRot(v) { 
+        config.angle = parseInt(v); 
+        document.getElementById('rotVal').innerText = v + "°"; 
+        document.getElementById('angleSlider').value = v; 
+        runOptimizer(); // AUTO UPDATE TRIGGERED
+    }
+
+    function updateFlex(v) { 
+        config.flex = parseFloat(v); 
+        document.getElementById('flexVal').innerText = v + " ft";
+        runOptimizer(); // AUTO UPDATE TRIGGERED
+    }
+
+    // --- LOGIC: GENERATOR ---
+    function runOptimizer() {
+        if(landPoly.length < 3) return; // Silent return if not ready
+        
+        const pattern = document.getElementById('pattern').value;
+        const borderDist = parseFloat(document.getElementById('borderDist').value) * pxPerFt;
+        const flexPx = config.flex * pxPerFt;
+
+        // Determine X/Y Spacing
+        let spX, spY;
+        if(pattern === 'rect') {
+            spX = parseFloat(document.getElementById('distX').value) * pxPerFt;
+            spY = parseFloat(document.getElementById('distY').value) * pxPerFt;
+        } else {
+            const d = parseFloat(document.getElementById('optDist').value) * pxPerFt;
+            spX = d;
+            spY = (pattern === 'tri') ? d * 0.866 : d;
+        }
+
+        let cx=0, cy=0; landPoly.forEach(p=>{cx+=p.x; cy+=p.y}); cx/=landPoly.length; cy/=landPoly.length;
+        const rad = -config.angle * (Math.PI/180);
+        const rot = (p, a) => ({ x: cx + (p.x-cx)*Math.cos(a) - (p.y-cy)*Math.sin(a), y: cy + (p.x-cx)*Math.sin(a) + (p.y-cy)*Math.cos(a) });
+
+        const flatLand = landPoly.map(p => rot(p, rad));
+        const flatObs = obstacles.map(obs => obs.map(p => rot(p, rad)));
+        let minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity;
+        flatLand.forEach(p => { minX=Math.min(minX,p.x); maxX=Math.max(maxX,p.x); minY=Math.min(minY,p.y); maxY=Math.max(maxY,p.y); });
+
+        const stepSize = pxPerFt * 1.0; 
+        let bestResult = { trees: [], count: -1 };
+
+        // Optimization: Try offsets
+        for(let offX = 0; offX < spX; offX += stepSize) {
+            for(let offY = 0; offY < spY; offY += stepSize) {
+                let currentTrees = [];
+                let rIdx = 0;
+                for(let y = minY + offY; y <= maxY; y += spY) {
+                    let stagger = (pattern === 'tri' && rIdx%2!==0) ? spX/2 : 0;
+                    for(let x = minX + offX - stagger; x <= maxX; x += spX) {
+                        let p = {x,y, nudged:false, selected:false};
+                        // 1. Check
+                        let ok = checkPos(p, flatLand, flatObs, borderDist);
+                        // 2. Nudge
+                        if(!ok && flexPx > 0) {
+                            const shifts = [{x:flexPx, y:0}, {x:-flexPx, y:0}, {x:0, y:flexPx}, {x:0, y:-flexPx}];
+                            for(let s of shifts) {
+                                let nudgedP = {x: p.x + s.x, y: p.y + s.y, nudged: true, selected:false};
+                                if(checkPos(nudgedP, flatLand, flatObs, borderDist)) { p = nudgedP; ok = true; break; }
+                            }
+                        }
+                        if(ok) currentTrees.push(p);
+                    }
+                    rIdx++;
+                }
+                if(currentTrees.length > bestResult.count) bestResult = { trees: currentTrees, count: currentTrees.length };
+            }
+        }
+        trees = bestResult.trees.map(p => { let rp = rot(p, -rad); rp.nudged=p.nudged; rp.selected=false; return rp; });
+        updateCount(); render(); 
+    }
+
+    function checkPos(p, land, obs, border) {
+        if(!isInside(p, land)) return false;
+        if(distToPoly(p, land) < border) return false;
+        for(let o of obs) if(isInside(p, o) || distToPoly(p, o) < border) return false;
+        return true;
+    }
+
+    // --- EDIT & SELECTION ---
+    function toggleEditMode() {
+        isEditing = !isEditing;
+        const btn = document.getElementById('btnEdit');
+        const tools = document.getElementById('editTools');
+        btn.innerText = isEditing ? "ON" : "OFF";
+        btn.className = isEditing ? "edit-mode" : "";
+        tools.style.display = isEditing ? 'flex' : 'none';
+        setMode(isEditing ? 'edit' : 'pan');
+        showToast(isEditing ? "Edit Mode ON" : "Edit Mode OFF");
+    }
+    function selectAll() { trees.forEach(t => t.selected = true); render(); }
+    function deselectAll() { trees.forEach(t => t.selected = false); render(); }
+
+    wrapper.addEventListener('mousedown', e => {
+        startPos = {x: e.clientX, y: e.clientY}; 
+        dragStartWorld = {x:mouseWorld.x, y:mouseWorld.y};
+        isDrag = true;
+
+        if(mode === 'pan') { wrapper.style.cursor='grabbing'; return; }
+        
+        // EDIT INTERACTION
+        if(mode === 'edit' || mode === 'boxselect') {
+            if(mode === 'boxselect') {
+                selectionBox = { start: {...mouseWorld}, end: {...mouseWorld} };
+                return;
+            }
+            // Tree Click
+            let clickedTree = null;
+            for(let t of trees) { if(Math.hypot(mouseWorld.x-t.x, mouseWorld.y-t.y) < 10/view.s) { clickedTree = t; break; } }
+
+            if(clickedTree) {
+                if(e.shiftKey) clickedTree.selected = !clickedTree.selected;
+                else if(!clickedTree.selected) { deselectAll(); clickedTree.selected = true; }
+                wrapper.style.cursor = 'move';
+            } else {
+                if(!e.shiftKey) deselectAll();
+                mode = 'pan'; // Temp pan
+                wrapper.style.cursor = 'grabbing';
+            }
+        }
+        
+        // DRAW INTERACTION
+        if(['land','obstacle','calibrate'].includes(mode)) {
+            if(mode==='calibrate') {
+                activePoly.push({...mouseWorld});
+                if(activePoly.length===2) {
+                    const d = Math.hypot(activePoly[1].x-activePoly[0].x, activePoly[1].y-activePoly[0].y);
+                    const ft = prompt("Real Feet:", "100");
+                    if(ft) { pxPerFt=d/parseFloat(ft); showToast("Calibrated!"); }
+                    activePoly=[]; setMode('pan');
+                }
+            } else {
+                if(activePoly.length>2 && Math.hypot(mouseWorld.x-activePoly[0].x, mouseWorld.y-activePoly[0].y)<15/view.s) {
+                    if(mode==='land') landPoly=[...activePoly]; else obstacles.push([...activePoly]);
+                    activePoly=[]; setMode('pan'); showToast("Closed");
+                    // Trigger calc immediately after drawing land
+                    if(mode==='land' && landPoly.length>2) runOptimizer();
+                } else activePoly.push({...mouseWorld});
+            }
+        }
+        render();
+    });
+
+    wrapper.addEventListener('mousemove', e => {
+        const r = canvas.getBoundingClientRect();
+        mouseWorld = { x: (e.clientX - r.left - view.x)/view.s, y: (e.clientY - r.top - view.y)/view.s };
+        
+        if(isDrag) {
+            if(mode === 'pan') {
+                view.x += e.clientX - startPos.x; view.y += e.clientY - startPos.y;
+                startPos = {x:e.clientX, y:e.clientY}; 
+            }
+            else if (mode === 'boxselect' && selectionBox) selectionBox.end = {...mouseWorld};
+            else if (mode === 'edit') {
+                const dx = mouseWorld.x - dragStartWorld.x;
+                const dy = mouseWorld.y - dragStartWorld.y;
+                let moved = false;
+                trees.forEach(t => {
+                    if(t.selected) { t.x += dx; t.y += dy; t.nudged = true; moved=true; }
+                });
+                if(moved) dragStartWorld = {...mouseWorld};
+                else {
+                    view.x += e.clientX - startPos.x; view.y += e.clientY - startPos.y;
+                    startPos = {x:e.clientX, y:e.clientY}; 
+                }
+            }
+        }
+        
+        // Hover Check
+        hoveredTree = null;
+        if(!isDrag) {
+            for(let t of trees) { if(Math.hypot(mouseWorld.x-t.x, mouseWorld.y-t.y) < 10/view.s) { hoveredTree=t; break; }}
+        }
+        render();
+    });
+
+    wrapper.addEventListener('mouseup', () => {
+        if(mode === 'boxselect' && selectionBox) {
+            const x1 = Math.min(selectionBox.start.x, selectionBox.end.x);
+            const x2 = Math.max(selectionBox.start.x, selectionBox.end.x);
+            const y1 = Math.min(selectionBox.start.y, selectionBox.end.y);
+            const y2 = Math.max(selectionBox.start.y, selectionBox.end.y);
+            trees.forEach(t => { if(t.x >= x1 && t.x <= x2 && t.y >= y1 && t.y <= y2) t.selected = true; });
+            selectionBox = null; setMode('edit');
+        }
+        if(isEditing && mode === 'pan') mode = 'edit';
+        isDrag = false;
+        wrapper.style.cursor = (mode==='edit'||mode==='boxselect')?'default':(mode==='pan'?'grab':'crosshair');
+        render();
+    });
+
+    wrapper.addEventListener('dblclick', () => {
+        if(!isEditing) return;
+        for(let i=0; i<trees.length; i++) {
+            if(Math.hypot(mouseWorld.x-trees[i].x, mouseWorld.y-trees[i].y) < 10/view.s) {
+                trees.splice(i, 1); updateCount(); render(); return;
+            }
+        }
+        if(checkPos(mouseWorld, landPoly, obstacles, 0)) { 
+            trees.push({x:mouseWorld.x, y:mouseWorld.y, nudged:true, selected:true}); updateCount(); render(); 
+        }
+    });
+
+    wrapper.addEventListener('wheel', e => {
+        e.preventDefault(); const z = Math.exp(e.deltaY < 0 ? 0.1 : -0.1);
+        const r = canvas.getBoundingClientRect();
+        view.x -= (e.clientX-r.left-view.x)*(z-1); view.y -= (e.clientY-r.top-view.y)*(z-1); view.s *= z; render();
+    });
+
+    document.getElementById('fileInput').addEventListener('change', e=>{
+        const f=e.target.files[0]; if(!f)return;
+        const r=new FileReader(); r.onload=ev=>{ bgImg=new Image(); bgImg.onload=()=>{
+            view.s=Math.min(canvas.width/bgImg.width, canvas.height/bgImg.height)*0.9;
+            view.x=(canvas.width-bgImg.width*view.s)/2; view.y=(canvas.height-bgImg.height*view.s)/2; render();
+        }; bgImg.src=ev.target.result; }; r.readAsDataURL(f);
+    });
+
+    function setMode(m) { 
+        if(m==='edit'||m==='boxselect') { isEditing=true; } else { isEditing=false; deselectAll(); }
+        mode=m; activePoly=[]; wrapper.style.cursor=(m==='pan'||m==='edit')?'grab':'crosshair';
+        ['btnLand','btnObs','btnCal','btnBoxSel'].forEach(id=>{ let el = document.getElementById(id); if(el) el.classList.remove('active'); });
+        if(['land','obstacle','calibrate','boxselect'].includes(m)) {
+            let id = m==='land'?'btnLand':m==='obstacle'?'btnObs':m==='calibrate'?'btnCal':'btnBoxSel';
+            document.getElementById(id).classList.add('active');
+        }
+        const btn = document.getElementById('btnEdit'); btn.innerText = isEditing ? "ON" : "OFF"; btn.className = isEditing ? "edit-mode" : "";
+        document.getElementById('editTools').style.display = isEditing ? 'flex' : 'none';
+    }
+
+    function updateCount() { document.getElementById('treeCount').innerText = trees.length; }
+    function autoAlign() {
+        if(landPoly.length<3) return; let maxD=0, ang=0; for(let i=0;i<landPoly.length;i++) { let p1=landPoly[i], p2=landPoly[(i+1)%landPoly.length]; let d=Math.hypot(p2.x-p1.x, p2.y-p1.y); if(d>maxD) { maxD=d; ang=Math.atan2(p2.y-p1.y, p2.x-p1.x)*180/Math.PI; }}
+        if(ang<0)ang+=180; if(ang>180)ang-=180; updateRot(Math.round(ang));
+    }
+    function undo() { if(activePoly.length)activePoly.pop(); else if(obstacles.length)obstacles.pop(); else landPoly=[]; render(); }
+    function resetAll() { if(confirm("Clear All?")){ landPoly=[]; obstacles=[]; trees=[]; activePoly=[]; bgImg=null; view={s:1,x:0,y:0}; updateCount(); render(); }}
+    function showToast(msg, err=false) { const t = document.getElementById('toast'); t.innerText=msg; t.style.opacity=1; t.style.background=err?'#d32f2f':'#222'; setTimeout(()=>t.style.opacity=0, 2000); }
+
+    // RENDER
+    function render() {
+        ctx.setTransform(1,0,0,1,0,0); ctx.fillStyle='#333'; ctx.fillRect(0,0,canvas.width,canvas.height);
+        ctx.setTransform(view.s,0,0,view.s,view.x,view.y);
+        if(bgImg) ctx.drawImage(bgImg,0,0);
+        
+        const drawP = (pts,f,s,c=true) => {
+            if(!pts.length)return; ctx.beginPath(); ctx.moveTo(pts[0].x,pts[0].y);
+            for(let i=1;i<pts.length;i++)ctx.lineTo(pts[i].x,pts[i].y);
+            if(c)ctx.closePath(); ctx.fillStyle=f; ctx.fill(); ctx.strokeStyle=s; ctx.lineWidth=2/view.s; ctx.stroke();
+            pts.forEach(p=>{ctx.beginPath();ctx.arc(p.x,p.y,3/view.s,0,Math.PI*2);ctx.fillStyle=s;ctx.fill();});
+        }
+        if(landPoly.length) {
+            drawP(landPoly,'rgba(46,125,50,0.3)','#2e7d32');
+            ctx.fillStyle = '#fff';
+            for(let i=0; i<landPoly.length; i++) {
+                let p1=landPoly[i], p2=landPoly[(i+1)%landPoly.length];
+                let dist = Math.hypot(p2.x-p1.x, p2.y-p1.y);
+                drawLbl(`${(dist/pxPerFt).toFixed(1)}ft`, (p1.x+p2.x)/2, (p1.y+p2.y)/2, '#2e7d32');
+            }
+        }
+        obstacles.forEach(o=>drawP(o,'rgba(211,47,47,0.4)','#c62828'));
+        if(activePoly.length) { 
+            drawP(activePoly,'rgba(255,255,255,0.2)','#fff',false); 
+            let l=activePoly[activePoly.length-1]; 
+            ctx.beginPath(); ctx.moveTo(l.x,l.y); ctx.lineTo(mouseWorld.x,mouseWorld.y); ctx.strokeStyle='#fff'; ctx.lineWidth=1/view.s; ctx.stroke();
+            drawLbl(`${(Math.hypot(mouseWorld.x-l.x, mouseWorld.y-l.y)/pxPerFt).toFixed(1)}ft`, (l.x+mouseWorld.x)/2, (l.y+mouseWorld.y)/2, '#000');
+        }
+
+        if(mode === 'boxselect' && selectionBox) {
+            const x = Math.min(selectionBox.start.x, selectionBox.end.x);
+            const w = Math.abs(selectionBox.end.x - selectionBox.start.x);
+            const y = Math.min(selectionBox.start.y, selectionBox.end.y);
+            const h = Math.abs(selectionBox.end.y - selectionBox.start.y);
+            ctx.fillStyle = 'rgba(0, 188, 212, 0.3)'; ctx.fillRect(x,y,w,h);
+            ctx.strokeStyle = '#00bcd4'; ctx.lineWidth = 1/view.s; ctx.strokeRect(x,y,w,h);
+        }
+
+        trees.forEach(t=>{
+            ctx.beginPath(); ctx.arc(t.x,t.y, (t===hoveredTree?6:4)/view.s, 0, Math.PI*2);
+            if(t.selected) ctx.fillStyle = '#00bcd4';
+            else if(t===hoveredTree) ctx.fillStyle = '#ffff00';
+            else if(t.nudged) ctx.fillStyle = '#ff9800';
+            else ctx.fillStyle = '#76ff03';
+            ctx.fill();
+            if(t.selected) { ctx.strokeStyle='#fff'; ctx.lineWidth=2/view.s; ctx.stroke(); }
+        });
+
+        // Inspector logic: Draw for Hovered OR First Selected if dragging
+        const target = hoveredTree || (trees.find(t=>t.selected) && isDrag ? trees.find(t=>t.selected) : null);
+        if(target) drawInspector(target);
+    }
+
+    function drawInspector(t) {
+        // Neighbors: Top 8
+        let pNs = [];
+        trees.forEach(n => {
+            if(n===t) return;
+            let d = Math.hypot(n.x-t.x, n.y-t.y);
+            if(d < 100 * pxPerFt) pNs.push({n:n, d:d});
+        });
+        pNs.sort((a,b) => a.d - b.d);
+        pNs.slice(0, 8).forEach(item => {
+            let n = item.n;
+            ctx.beginPath(); ctx.moveTo(t.x,t.y); ctx.lineTo(n.x,n.y);
+            ctx.strokeStyle='rgba(255,255,255,0.4)'; ctx.lineWidth=1/view.s; ctx.stroke();
+            drawLbl(`${(item.d/pxPerFt).toFixed(1)}ft`, (t.x+n.x)/2, (t.y+n.y)/2, '#444');
+        });
+
+        // Borders
+        let edges=[]; for(let i=0;i<landPoly.length;i++) { let p1=landPoly[i], p2=landPoly[(i+1)%landPoly.length]; let proj = getProj(t,p1,p2); edges.push({p:proj, d:Math.hypot(t.x-proj.x, t.y-proj.y)}); }
+        edges.sort((a,b)=>a.d-b.d);
+        // Show up to 8 border lines if they are close
+        edges.forEach(edge => {
+            if(edge.d < 80*pxPerFt) {
+                ctx.beginPath(); ctx.moveTo(t.x,t.y); ctx.lineTo(edge.p.x, edge.p.y);
+                ctx.strokeStyle='#ffff00'; ctx.setLineDash([5/view.s,5/view.s]); ctx.lineWidth=1.5/view.s; ctx.stroke(); ctx.setLineDash([]);
+                drawLbl(`${(edge.d/pxPerFt).toFixed(1)}ft`, (t.x+edge.p.x)/2, (t.y+edge.p.y)/2, '#000');
+            }
+        });
+    }
+
+    function drawLbl(txt,x,y, bg) {
+        ctx.save(); ctx.font=`bold ${11/view.s}px Arial`; 
+        let w=ctx.measureText(txt).width; ctx.fillStyle=bg; ctx.globalAlpha=0.8; 
+        ctx.fillRect(x-w/2-2,y-7/view.s,w+4,14/view.s);
+        ctx.globalAlpha=1; ctx.fillStyle='#fff'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(txt,x,y); ctx.restore();
+    }
+    
+    function isInside(p, poly) { let ins=false; for(let i=0,j=poly.length-1;i<poly.length;j=i++){ if(((poly[i].y>p.y)!=(poly[j].y>p.y))&&(p.x<(poly[j].x-poly[i].x)*(p.y-poly[i].y)/(poly[j].y-poly[i].y)+poly[i].x)) ins=!ins; } return ins; }
+    function getProj(p, v, w) { let l2=(v.x-w.x)**2+(v.y-w.y)**2; if(l2===0)return v; let t=((p.x-v.x)*(w.x-v.x)+(p.y-v.y)*(w.y-v.y))/l2; t=Math.max(0,Math.min(1,t)); return {x:v.x+t*(w.x-v.x), y:v.y+t*(w.y-v.y)}; }
+    function distToPoly(p, poly) { let m=Infinity; for(let i=0;i<poly.length;i++) m=Math.min(m, Math.hypot(p.x-getProj(p,poly[i],poly[(i+1)%poly.length]).x, p.y-getProj(p,poly[i],poly[(i+1)%poly.length]).y)); return m; }
+</script>
+</body>
+</html>

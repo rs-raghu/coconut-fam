@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Coconut V7 - Auto Optimizer</title>
+    <style>
+        :root { --primary: #2e7d32; --panel: #f5f5f5; --accent: #ff9800; }
+        body { font-family: 'Segoe UI', sans-serif; margin: 0; display: flex; height: 100vh; background: #222; overflow: hidden; color: #333; }
+        
+        #controls {
+            width: 320px; background: var(--panel); padding: 15px; box-shadow: 2px 0 20px rgba(0,0,0,0.5);
+            display: flex; flex-direction: column; gap: 10px; overflow-y: auto; z-index: 100;
+        }
+        h2 { margin: 0; color: var(--primary); font-size: 1.2rem; display: flex; align-items: center; justify-content: space-between; }
+        .tag { background: var(--accent); color: white; padding: 2px 8px; border-radius: 10px; font-size: 0.7rem; }
+        
+        button { padding: 10px; cursor: pointer; border: 1px solid #ccc; border-radius: 5px; background: #fff; font-weight: 600; font-size: 0.9rem; }
+        button:hover { background: #eee; }
+        button.active { background: var(--primary); color: white; border-color: var(--primary); }
+        button.highlight { background: var(--accent); color: white; border: none; }
+        
+        .row { display: flex; gap: 8px; }
+        input, select { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+        label { font-size: 0.75rem; font-weight: bold; color: #666; display: block; margin-bottom: 3px; }
+
+        #canvas-wrapper { flex-grow: 1; position: relative; background: #333; cursor: grab; }
+        canvas { display: block; }
+        
+        #toast {
+            position: absolute; top: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.8); color: white; padding: 8px 16px; border-radius: 20px;
+            font-size: 0.85rem; opacity: 0; transition: opacity 0.3s; pointer-events: none;
+        }
+        #stats-overlay {
+            position: absolute; bottom: 20px; right: 20px; pointer-events: none;
+            background: rgba(255,255,255,0.9); padding: 10px; border-radius: 8px;
+            font-size: 0.8rem; box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+        }
+    </style>
+</head>
+<body>
+
+<div id="controls">
+    <h2>Coconut V7 <span class="tag">OPTIMIZER</span></h2>
+
+    <div>
+        <label>1. MAP & SCALE</label>
+        <div class="row">
+            <button onclick="document.getElementById('fileInput').click()">📁 Load Map</button>
+            <button id="btnCal" onclick="setMode('calibrate')">📏 Calibrate</button>
+        </div>
+        <input type="file" id="fileInput" accept="image/*" style="display:none">
+        <div id="calStatus" style="font-size:0.7rem; color:#666; margin-top:2px;">Scale: 1px = 1ft (Default)</div>
+    </div>
+
+    <div>
+        <label>2. BOUNDARIES</label>
+        <div class="row">
+            <button id="btnLand" onclick="setMode('land')">Draw Land</button>
+            <button id="btnObs" onclick="setMode('obstacle')">Obstacle</button>
+        </div>
+        <div class="row" style="margin-top:5px;">
+            <button onclick="undo()">↶ Undo</button>
+            <button onclick="resetAll()" style="color:#d32f2f;">✖ Clear</button>
+        </div>
+    </div>
+
+    <div style="border-top:1px solid #ddd; padding-top:10px;">
+        <label>3. PLANTING CONFIG</label>
+        <select id="pattern" onchange="runOptimizer()">
+            <option value="sq">Square Grid (Rectangular)</option>
+            <option value="tri">Triangular (Hexagonal)</option>
+        </select>
+        
+        <div class="row" style="margin-top:8px;">
+            <div style="flex:1"><label>Spacing (ft)</label><input type="number" id="optDist" value="25"></div>
+            <div style="flex:1"><label>Border (ft)</label><input type="number" id="borderDist" value="5"></div>
+        </div>
+
+        <label style="margin-top:10px;">Flexibility (Nudge): <span id="flexVal">0 ft</span></label>
+        <input type="range" min="0" max="5" step="0.5" value="0" oninput="updateFlex(this.value)">
+
+        <label style="margin-top:10px;">Grid Angle: <span id="rotVal">0°</span></label>
+        <div class="row">
+            <input type="range" id="angleSlider" min="0" max="180" value="0" oninput="updateRot(this.value)">
+        </div>
+        <button class="highlight" style="width:100%; margin-top:5px;" onclick="autoAlign()">✨ Auto-Align Walls</button>
+        
+        <button class="active" style="width:100%; margin-top:15px; padding:12px;" onclick="runOptimizer()">
+            🚀 CALCULATE (AUTO-OPTIMIZE)
+        </button>
+        <div style="font-size:0.7rem; color:#666; text-align:center; margin-top:5px;">
+            *Automatically shifts grid to find max trees
+        </div>
+    </div>
+</div>
+
+<div id="canvas-wrapper">
+    <div id="toast">Notification</div>
+    <div id="stats-overlay">
+        <div style="font-size:1.5rem; font-weight:bold; color:var(--primary); text-align:center;" id="treeCount">0</div>
+        <div style="text-align:center; font-weight:bold; color:#555;">TREES</div>
+        <div id="opt-msg" style="font-size:0.7rem; color:#888; margin-top:5px; border-top:1px solid #ccc; padding-top:5px;">Ready</div>
+    </div>
+    <canvas id="c"></canvas>
+</div>
+
+<script>
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    const wrapper = document.getElementById('canvas-wrapper');
+
+    let mode = 'pan'; 
+    let view = { s: 1, x: 0, y: 0 }; 
+    let isDrag = false, startPos = {x:0, y:0};
+    
+    let bgImg = null, pxPerFt = 1.0;
+    let landPoly = [], obstacles = [], activePoly = [], trees = [];
+    let config = { angle: 0, flex: 0 };
+    let hoveredTree = null;
+
+    // INIT
+    function resize() { canvas.width = wrapper.clientWidth; canvas.height = wrapper.clientHeight; render(); }
+    window.addEventListener('resize', resize); window.onload = resize;
+
+    // CORE: THE OPTIMIZER
+    function runOptimizer() {
+        if(landPoly.length < 3) return showToast("Draw Land First!", true);
+        
+        const pattern = document.getElementById('pattern').value;
+        const optDist = parseFloat(document.getElementById('optDist').value) * pxPerFt;
+        const borderDist = parseFloat(document.getElementById('borderDist').value) * pxPerFt;
+        const flexPx = config.flex * pxPerFt;
+        
+        // 1. Prepare Polygon (Rotated Flat)
+        let cx=0, cy=0; landPoly.forEach(p=>{cx+=p.x; cy+=p.y}); cx/=landPoly.length; cy/=landPoly.length;
+        const rad = -config.angle * (Math.PI/180);
+        const rot = (p, a) => ({ x: cx + (p.x-cx)*Math.cos(a) - (p.y-cy)*Math.sin(a), y: cy + (p.x-cx)*Math.sin(a) + (p.y-cy)*Math.cos(a) });
+
+        const flatLand = landPoly.map(p => rot(p, rad));
+        const flatObs = obstacles.map(obs => obs.map(p => rot(p, rad)));
+
+        // 2. Get Bounding Box
+        let minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity;
+        flatLand.forEach(p => { minX=Math.min(minX,p.x); maxX=Math.max(maxX,p.x); minY=Math.min(minY,p.y); maxY=Math.max(maxY,p.y); });
+
+        // 3. OPTIMIZATION LOOP
+        // We will shift the startX and startY by small steps to see which offset fits the most trees
+        // Step size: Check every 1 foot (or equivalent pixels)
+        const stepSize = pxPerFt * 1.0; 
+        
+        let bestResult = { trees: [], count: -1, centerX: 0, centerY: 0 };
+        
+        const rowH = (pattern === 'tri') ? optDist * 0.866 : optDist;
+        const colW = optDist;
+
+        // Try offsets for X (0 to optDist) and Y (0 to rowH)
+        for(let offX = 0; offX < colW; offX += stepSize) {
+            for(let offY = 0; offY < rowH; offY += stepSize) {
+                
+                let currentTrees = [];
+                let rIdx = 0;
+
+                // Generate Grid for this offset
+                for(let y = minY + offY; y <= maxY; y += rowH) {
+                    let stagger = (pattern === 'tri' && rIdx%2!==0) ? optDist/2 : 0;
+                    for(let x = minX + offX - stagger; x <= maxX; x += colW) {
+                         // Check Validity
+                        let p = {x,y};
+                        let validP = null;
+
+                        // Local check function
+                        const isValid = (pt) => {
+                            if(!isInside(pt, flatLand)) return false;
+                            if(distToPoly(pt, flatLand) < borderDist) return false;
+                            for(let o of flatObs) if(isInside(pt, o) || distToPoly(pt, o) < borderDist) return false;
+                            return true;
+                        };
+
+                        if(isValid(p)) validP = p;
+                        else if(flexPx > 0) {
+                             // Flex logic
+                             if(isValid({x:p.x+flexPx, y:p.y})) validP = {x:p.x+flexPx, y:p.y};
+                             else if(isValid({x:p.x-flexPx, y:p.y})) validP = {x:p.x-flexPx, y:p.y};
+                             else if(isValid({x:p.x, y:p.y+flexPx})) validP = {x:p.x, y:p.y+flexPx};
+                             else if(isValid({x:p.x, y:p.y-flexPx})) validP = {x:p.x, y:p.y-flexPx};
+                        }
+                        if(validP) currentTrees.push(validP);
+                    }
+                    rIdx++;
+                }
+
+                // Is this the best?
+                if(currentTrees.length > bestResult.count) {
+                    bestResult = { trees: currentTrees, count: currentTrees.length, offX, offY };
+                } 
+                // If equal count, pick the one that is more "Centered" (heuristic)
+                else if(currentTrees.length === bestResult.count && currentTrees.length > 0) {
+                     // Check bounds of trees vs bounds of land
+                     let tMinX=Infinity, tMaxX=-Infinity;
+                     currentTrees.forEach(t => { tMinX=Math.min(tMinX,t.x); tMaxX=Math.max(tMaxX,t.x); });
+                     let tCenter = (tMinX+tMaxX)/2;
+                     let lCenter = (minX+maxX)/2;
+                     let curDev = Math.abs(tCenter - lCenter);
+                     
+                     // Previous best deviation
+                     let pMinX=Infinity, pMaxX=-Infinity;
+                     bestResult.trees.forEach(t => { pMinX=Math.min(pMinX,t.x); pMaxX=Math.max(pMaxX,t.x); });
+                     let pCenter = (pMinX+pMaxX)/2;
+                     let prevDev = Math.abs(pCenter - lCenter);
+
+                     if(curDev < prevDev) {
+                        bestResult = { trees: currentTrees, count: currentTrees.length, offX, offY };
+                     }
+                }
+            }
+        }
+
+        // Apply best result (Rotate back)
+        trees = bestResult.trees.map(p => rot(p, -rad));
+        document.getElementById('treeCount').innerText = trees.length;
+        document.getElementById('opt-msg').innerText = `Optimized: Shifted X:${(bestResult.offX/pxPerFt).toFixed(1)}ft`;
+        render();
+        showToast("Optimization Complete!");
+    }
+
+    // --- STANDARD UI LOGIC ---
+    function showToast(msg, err=false) {
+        const t = document.getElementById('toast'); t.innerText=msg; t.style.opacity=1; t.style.background=err?'#d32f2f':'#222';
+        setTimeout(()=>t.style.opacity=0, 2000);
+    }
+    
+    // Mouse Interaction
+    wrapper.addEventListener('mousedown', e => {
+        const r = canvas.getBoundingClientRect();
+        const wx = (e.clientX - r.left - view.x)/view.s;
+        const wy = (e.clientY - r.top - view.y)/view.s;
+
+        if(mode === 'pan') { isDrag = true; startPos = {x: e.clientX, y: e.clientY}; wrapper.style.cursor='grabbing'; }
+        else if(mode === 'calibrate') {
+            activePoly.push({x:wx, y:wy});
+            if(activePoly.length===2) {
+                const d = Math.hypot(activePoly[1].x-activePoly[0].x, activePoly[1].y-activePoly[0].y);
+                const ft = prompt("Real Feet:", "100");
+                if(ft) { pxPerFt=d/parseFloat(ft); document.getElementById('calStatus').innerText=`1ft=${pxPerFt.toFixed(2)}px`; showToast("Calibrated!"); }
+                activePoly=[]; setMode('pan');
+            }
+        } else {
+            if(activePoly.length>2 && Math.hypot(wx-activePoly[0].x, wy-activePoly[0].y)<15/view.s) {
+                if(mode==='land') landPoly=[...activePoly]; else obstacles.push([...activePoly]);
+                activePoly=[]; setMode('pan'); showToast("Shape Closed");
+            } else activePoly.push({x:wx, y:wy});
+        }
+        render();
+    });
+    wrapper.addEventListener('mousemove', e => {
+        const r = canvas.getBoundingClientRect();
+        const wx = (e.clientX - r.left - view.x)/view.s;
+        const wy = (e.clientY - r.top - view.y)/view.s;
+        if(isDrag && mode==='pan') {
+            view.x += e.clientX - startPos.x; view.y += e.clientY - startPos.y;
+            startPos = {x:e.clientX, y:e.clientY}; render();
+        } else if (mode==='pan') {
+            // Hover logic
+            hoveredTree = null;
+            for(let t of trees) { if(Math.hypot(wx-t.x, wy-t.y) < 10/view.s) { hoveredTree=t; break; }}
+            render();
+        } else { window.lastM={x:wx, y:wy}; render(); }
+    });
+    wrapper.addEventListener('mouseup', ()=>{isDrag=false; wrapper.style.cursor=mode==='pan'?'grab':'crosshair';});
+    wrapper.addEventListener('wheel', e => {
+        e.preventDefault(); const z = Math.exp(e.deltaY < 0 ? 0.1 : -0.1);
+        const r = canvas.getBoundingClientRect();
+        view.x -= (e.clientX-r.left-view.x)*(z-1); view.y -= (e.clientY-r.top-view.y)*(z-1); view.s *= z; render();
+    });
+
+    document.getElementById('fileInput').addEventListener('change', e=>{
+        const f=e.target.files[0]; if(!f)return;
+        const r=new FileReader(); r.onload=ev=>{ bgImg=new Image(); bgImg.onload=()=>{
+            view.s=Math.min(canvas.width/bgImg.width, canvas.height/bgImg.height)*0.9;
+            view.x=(canvas.width-bgImg.width*view.s)/2; view.y=(canvas.height-bgImg.height*view.s)/2; render();
+        }; bgImg.src=ev.target.result; }; r.readAsDataURL(f);
+    });
+
+    // HELPERS
+    function setMode(m) { mode=m; activePoly=[]; wrapper.style.cursor=m==='pan'?'grab':'crosshair'; ['btnLand','btnObs','btnCal'].forEach(id=>document.getElementById(id).classList.remove('active')); if(m!=='pan') document.getElementById(m==='land'?'btnLand':m==='obstacle'?'btnObs':'btnCal').classList.add('active'); }
+    function autoAlign() {
+        if(landPoly.length<3) return;
+        let maxD=0, ang=0;
+        for(let i=0;i<landPoly.length;i++) {
+            let p1=landPoly[i], p2=landPoly[(i+1)%landPoly.length];
+            let d=Math.hypot(p2.x-p1.x, p2.y-p1.y);
+            if(d>maxD) { maxD=d; ang=Math.atan2(p2.y-p1.y, p2.x-p1.x)*180/Math.PI; }
+        }
+        if(ang<0)ang+=180; if(ang>180)ang-=180;
+        updateRot(Math.round(ang));
+    }
+    function updateRot(v) { config.angle=parseInt(v); document.getElementById('rotVal').innerText=v+"°"; document.getElementById('angleSlider').value=v; runOptimizer(); }
+    function updateFlex(v) { config.flex=parseFloat(v); document.getElementById('flexVal').innerText=v+" ft"; runOptimizer(); }
+    function undo() { if(activePoly.length)activePoly.pop(); else if(obstacles.length)obstacles.pop(); else landPoly=[]; render(); }
+    function resetAll() { if(confirm("Clear All?")){ landPoly=[]; obstacles=[]; trees=[]; activePoly=[]; bgImg=null; view={s:1,x:0,y:0}; render(); }}
+
+    // RENDER & MATH
+    function render() {
+        ctx.setTransform(1,0,0,1,0,0); ctx.fillStyle='#333'; ctx.fillRect(0,0,canvas.width,canvas.height);
+        ctx.setTransform(view.s,0,0,view.s,view.x,view.y);
+        if(bgImg) ctx.drawImage(bgImg,0,0);
+        
+        const drawP = (pts,f,s,c=true) => {
+            if(!pts.length)return; ctx.beginPath(); ctx.moveTo(pts[0].x,pts[0].y);
+            for(let i=1;i<pts.length;i++)ctx.lineTo(pts[i].x,pts[i].y);
+            if(c)ctx.closePath(); ctx.fillStyle=f; ctx.fill(); ctx.strokeStyle=s; ctx.lineWidth=2/view.s; ctx.stroke();
+            pts.forEach(p=>{ctx.beginPath();ctx.arc(p.x,p.y,3/view.s,0,Math.PI*2);ctx.fillStyle=s;ctx.fill();});
+        }
+        if(landPoly.length) drawP(landPoly,'rgba(46,125,50,0.3)','#2e7d32');
+        obstacles.forEach(o=>drawP(o,'rgba(211,47,47,0.4)','#c62828'));
+        if(activePoly.length) { drawP(activePoly,'rgba(255,255,255,0.2)','#fff',false); 
+            if(window.lastM) { let l=activePoly[activePoly.length-1]; ctx.beginPath(); ctx.moveTo(l.x,l.y); ctx.lineTo(window.lastM.x,window.lastM.y); ctx.strokeStyle='#fff'; ctx.stroke(); }
+        }
+
+        trees.forEach(t=>{
+            ctx.beginPath(); ctx.arc(t.x,t.y,4/view.s,0,Math.PI*2);
+            ctx.fillStyle = (t===hoveredTree) ? '#ffff00' : '#76ff03'; ctx.fill();
+        });
+        if(hoveredTree) drawInspector(hoveredTree);
+    }
+
+    function drawInspector(t) {
+        // Draw lines to border
+        let edges=[];
+        for(let i=0;i<landPoly.length;i++) {
+            let p1=landPoly[i], p2=landPoly[(i+1)%landPoly.length];
+            let proj = getProj(t,p1,p2);
+            edges.push({p:proj, d:Math.hypot(t.x-proj.x, t.y-proj.y)});
+        }
+        edges.sort((a,b)=>a.d-b.d);
+        [0,1].forEach(i => {
+            if(edges[i] && edges[i].d < parseFloat(document.getElementById('optDist').value)*pxPerFt*3) {
+                ctx.beginPath(); ctx.moveTo(t.x,t.y); ctx.lineTo(edges[i].p.x, edges[i].p.y);
+                ctx.strokeStyle='#ffff00'; ctx.setLineDash([5/view.s,5/view.s]); ctx.lineWidth=1.5/view.s; ctx.stroke(); ctx.setLineDash([]);
+                drawLbl((edges[i].d/pxPerFt).toFixed(1)+"ft", (t.x+edges[i].p.x)/2, (t.y+edges[i].p.y)/2);
+            }
+        });
+    }
+
+    function drawLbl(txt,x,y) {
+        ctx.save(); ctx.font=`bold ${12/view.s}px Arial`; 
+        let w=ctx.measureText(txt).width; ctx.fillStyle='rgba(0,0,0,0.7)'; ctx.fillRect(x-w/2-2,y-6/view.s,w+4,12/view.s);
+        ctx.fillStyle='#fff'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(txt,x,y); ctx.restore();
+    }
+
+    function isInside(p, poly) {
+        let ins=false; for(let i=0,j=poly.length-1;i<poly.length;j=i++){ if(((poly[i].y>p.y)!=(poly[j].y>p.y))&&(p.x<(poly[j].x-poly[i].x)*(p.y-poly[i].y)/(poly[j].y-poly[i].y)+poly[i].x)) ins=!ins; } return ins;
+    }
+    function getProj(p, v, w) {
+        let l2=(v.x-w.x)**2+(v.y-w.y)**2; if(l2===0)return v;
+        let t=((p.x-v.x)*(w.x-v.x)+(p.y-v.y)*(w.y-v.y))/l2; t=Math.max(0,Math.min(1,t));
+        return {x:v.x+t*(w.x-v.x), y:v.y+t*(w.y-v.y)};
+    }
+    function distToPoly(p, poly) {
+        let m=Infinity; for(let i=0;i<poly.length;i++) m=Math.min(m, Math.hypot(p.x-getProj(p,poly[i],poly[(i+1)%poly.length]).x, p.y-getProj(p,poly[i],poly[(i+1)%poly.length]).y)); return m;
+    }
+</script>
+</body>
+</html>

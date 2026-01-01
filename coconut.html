@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Coconut Grove Planner</title>
+    <style>
+        :root {
+            --primary: #2e7d32;
+            --bg: #f5f5f5;
+            --panel: #ffffff;
+        }
+        body { font-family: 'Segoe UI', sans-serif; margin: 0; padding: 0; background: var(--bg); display: flex; height: 100vh; overflow: hidden; }
+        
+        /* Sidebar */
+        #controls {
+            width: 320px; background: var(--panel); padding: 20px; box-shadow: 2px 0 10px rgba(0,0,0,0.1);
+            display: flex; flex-direction: column; gap: 15px; overflow-y: auto; z-index: 10;
+        }
+        h2 { margin: 0 0 10px 0; color: var(--primary); }
+        .input-group { display: flex; flex-direction: column; gap: 5px; }
+        label { font-size: 0.9rem; font-weight: 600; color: #555; }
+        input, select, button { padding: 10px; border: 1px solid #ddd; border-radius: 4px; }
+        button { cursor: pointer; font-weight: bold; transition: 0.2s; }
+        button.primary { background: var(--primary); color: white; border: none; }
+        button.danger { background: #d32f2f; color: white; border: none; }
+        button:hover { opacity: 0.9; }
+        
+        .stats-box { background: #e8f5e9; padding: 10px; border-radius: 4px; border-left: 4px solid var(--primary); }
+        
+        /* Canvas Area */
+        #canvas-container { flex-grow: 1; position: relative; background-image: radial-gradient(#ddd 1px, transparent 1px); background-size: 20px 20px; }
+        canvas { display: block; cursor: crosshair; }
+        
+        .mode-indicator {
+            position: absolute; top: 10px; left: 10px; background: white; padding: 5px 10px; 
+            border-radius: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); font-size: 0.8rem; pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+<div id="controls">
+    <h2>🌴 Coconut Planner</h2>
+    
+    <div class="stats-box">
+        <div id="tree-count">Trees: 0</div>
+        <div id="land-area">Area: 0 sq ft</div>
+    </div>
+
+    <div class="input-group">
+        <label>Current Mode</label>
+        <select id="modeSelect">
+            <option value="draw_land">1. Draw Land Boundary</option>
+            <option value="draw_obstacle">2. Draw Obstacles (Wells/Lines)</option>
+            <option value="view">3. View & Calculate</option>
+        </select>
+    </div>
+
+    <div class="input-group">
+        <label>Pattern Type</label>
+        <select id="patternType">
+            <option value="triangular">Triangular (Optimal)</option>
+            <option value="square">Square Grid</option>
+        </select>
+    </div>
+
+    <div class="input-group">
+        <label>Optimal Dist (ft)</label>
+        <input type="number" id="optDist" value="25">
+    </div>
+
+    <div class="input-group">
+        <label>Border Clearance (ft)</label>
+        <input type="number" id="borderDist" value="5">
+    </div>
+    
+    <div class="input-group">
+        <label>Scale (1px = X ft)</label>
+        <input type="number" id="scaleInput" value="1" disabled title="Zoom handling is auto in this demo">
+        <small style="color:#888;">For demo, 1 pixel = 1 foot</small>
+    </div>
+
+    <button class="primary" onclick="calculateLayout()">Recalculate Layout</button>
+    <button class="danger" onclick="resetCanvas()">Clear All</button>
+    
+    <div style="font-size: 0.8rem; color: #666; margin-top: auto;">
+        <strong>Instructions:</strong><br>
+        1. Select "Draw Land". Click on canvas to add corners. Close shape by clicking near start.<br>
+        2. Select "Draw Obstacle" to mask out wells/houses.<br>
+        3. Click "Recalculate".
+    </div>
+</div>
+
+<div id="canvas-container">
+    <div class="mode-indicator" id="modeIndicator">Mode: Draw Land Boundary</div>
+    <canvas id="farmCanvas"></canvas>
+</div>
+
+<script>
+    const canvas = document.getElementById('farmCanvas');
+    const ctx = canvas.getContext('2d');
+    const container = document.getElementById('canvas-container');
+    
+    // State
+    let landPoints = [];
+    let obstacles = []; // Array of arrays of points
+    let currentObstacle = [];
+    let trees = [];
+    let isDrawing = false;
+    let mode = 'draw_land'; // draw_land, draw_obstacle, view
+    
+    // Config
+    let config = {
+        optDist: 25,
+        borderDist: 5,
+        pattern: 'triangular'
+    };
+
+    // Resize Canvas
+    function resize() {
+        canvas.width = container.clientWidth;
+        canvas.height = container.clientHeight;
+        draw();
+    }
+    window.addEventListener('resize', resize);
+    setTimeout(resize, 100);
+
+    // Event Listeners
+    document.getElementById('modeSelect').addEventListener('change', (e) => {
+        mode = e.target.value;
+        document.getElementById('modeIndicator').innerText = "Mode: " + e.target.options[e.target.selectedIndex].text;
+        // If switching away from obstacle, save current if exists
+        if (mode !== 'draw_obstacle' && currentObstacle.length > 2) {
+            obstacles.push([...currentObstacle]);
+            currentObstacle = [];
+        }
+        draw();
+    });
+
+    canvas.addEventListener('mousedown', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+
+        if (mode === 'draw_land') {
+            // Check if closing loop
+            if (landPoints.length > 2 && dist(x, y, landPoints[0].x, landPoints[0].y) < 20) {
+                // Loop closed
+                draw();
+                return;
+            }
+            landPoints.push({x, y});
+        } else if (mode === 'draw_obstacle') {
+             if (currentObstacle.length > 2 && dist(x, y, currentObstacle[0].x, currentObstacle[0].y) < 20) {
+                obstacles.push([...currentObstacle]);
+                currentObstacle = [];
+            } else {
+                currentObstacle.push({x, y});
+            }
+        }
+        draw();
+    });
+
+    // Main Draw Function
+    function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // 1. Draw Land Boundary
+        if (landPoints.length > 0) {
+            ctx.beginPath();
+            ctx.moveTo(landPoints[0].x, landPoints[0].y);
+            for (let i = 1; i < landPoints.length; i++) {
+                ctx.lineTo(landPoints[i].x, landPoints[i].y);
+            }
+            if (landPoints.length > 2) ctx.closePath();
+            ctx.fillStyle = 'rgba(232, 245, 233, 0.5)';
+            ctx.fill();
+            ctx.strokeStyle = '#2e7d32';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+            
+            // Draw points
+            ctx.fillStyle = '#2e7d32';
+            landPoints.forEach(p => {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+
+        // 2. Draw Obstacles
+        const allObstacles = [...obstacles, ...(currentObstacle.length > 0 ? [currentObstacle] : [])];
+        allObstacles.forEach(obs => {
+            if (obs.length === 0) return;
+            ctx.beginPath();
+            ctx.moveTo(obs[0].x, obs[0].y);
+            for (let i = 1; i < obs.length; i++) {
+                ctx.lineTo(obs[i].x, obs[i].y);
+            }
+            ctx.closePath();
+            ctx.fillStyle = 'rgba(211, 47, 47, 0.3)';
+            ctx.fill();
+            ctx.strokeStyle = '#c62828';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        });
+
+        // 3. Draw Trees & Measurements
+        trees.forEach(tree => {
+            // Tree Canopy
+            ctx.beginPath();
+            ctx.arc(tree.x, tree.y, 8, 0, Math.PI * 2); // Visual size
+            ctx.fillStyle = '#1b5e20';
+            ctx.fill();
+            
+            // Root zone (Optimal Distance Visualization)
+            ctx.beginPath();
+            ctx.arc(tree.x, tree.y, config.optDist / 2, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(46, 125, 50, 0.2)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        });
+    }
+
+    // Logic: Calculate Layout
+    function calculateLayout() {
+        if (landPoints.length < 3) {
+            alert("Please draw a closed land shape first.");
+            return;
+        }
+
+        config.optDist = parseFloat(document.getElementById('optDist').value);
+        config.borderDist = parseFloat(document.getElementById('borderDist').value);
+        config.pattern = document.getElementById('patternType').value;
+
+        trees = [];
+        
+        // Get Bounding Box
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        landPoints.forEach(p => {
+            if (p.x < minX) minX = p.x;
+            if (p.x > maxX) maxX = p.x;
+            if (p.y < minY) minY = p.y;
+            if (p.y > maxY) maxY = p.y;
+        });
+
+        // Add padding for border clearance
+        // We generate points everywhere, then filter them
+        
+        const rowHeight = config.pattern === 'triangular' 
+            ? config.optDist * (Math.sqrt(3) / 2) 
+            : config.optDist;
+
+        let rowCount = 0;
+        for (let y = minY; y <= maxY; y += rowHeight) {
+            let xOffset = 0;
+            // Triangular Offset
+            if (config.pattern === 'triangular' && rowCount % 2 !== 0) {
+                xOffset = config.optDist / 2;
+            }
+
+            for (let x = minX + xOffset; x <= maxX; x += config.optDist) {
+                const point = {x, y};
+
+                // 1. Check if inside Land
+                if (isPointInPolygon(point, landPoints)) {
+                    // 2. Check Border Distance (Simple Approximation for poly)
+                    // (For production, calculate dist to nearest line segment)
+                    if (getDistToPolyBoundary(point, landPoints) >= config.borderDist) {
+                        
+                        // 3. Check Obstacles
+                        let hitObstacle = false;
+                        for (let obs of obstacles) {
+                            if (isPointInPolygon(point, obs)) {
+                                hitObstacle = true; 
+                                break;
+                            }
+                            // Also check distance to obstacle boundary if needed
+                             if (getDistToPolyBoundary(point, obs) < config.borderDist && isPointNearPolygon(point, obs, config.borderDist)) {
+                                 // This handles being outside the obstacle but too close
+                                 hitObstacle = true;
+                                 break;
+                             }
+                        }
+
+                        if (!hitObstacle) {
+                            trees.push(point);
+                        }
+                    }
+                }
+            }
+            rowCount++;
+        }
+
+        document.getElementById('tree-count').innerText = `Trees: ${trees.length}`;
+        draw();
+    }
+
+    // MATH HELPERS -----------------------------
+
+    function dist(x1, y1, x2, y2) {
+        return Math.sqrt((x2-x1)**2 + (y2-y1)**2);
+    }
+
+    // Ray-Casting Algorithm for Point in Polygon
+    function isPointInPolygon(p, polygon) {
+        let isInside = false;
+        let minX = polygon[0].x, maxX = polygon[0].x;
+        let minY = polygon[0].y, maxY = polygon[0].y;
+        for (let n = 1; n < polygon.length; n++) {
+            let q = polygon[n];
+            minX = Math.min(q.x, minX);
+            maxX = Math.max(q.x, maxX);
+            minY = Math.min(q.y, minY);
+            maxY = Math.max(q.y, maxY);
+        }
+
+        if (p.x < minX || p.x > maxX || p.y < minY || p.y > maxY) {
+            return false;
+        }
+
+        let i = 0, j = polygon.length - 1;
+        for (i, j; i < polygon.length; j = i++) {
+            if ( (polygon[i].y > p.y) != (polygon[j].y > p.y) &&
+                 p.x < (polygon[j].x - polygon[i].x) * (p.y - polygon[i].y) / (polygon[j].y - polygon[i].y) + polygon[i].x ) {
+                isInside = !isInside;
+            }
+        }
+        return isInside;
+    }
+
+    // Distance from point to closest polygon edge
+    function getDistToPolyBoundary(p, poly) {
+        let minDst = Infinity;
+        for (let i = 0; i < poly.length; i++) {
+            let j = (i + 1) % poly.length;
+            let d = distToSegment(p, poly[i], poly[j]);
+            if (d < minDst) minDst = d;
+        }
+        return minDst;
+    }
+
+    function sqr(x) { return x * x }
+    function dist2(v, w) { return sqr(v.x - w.x) + sqr(v.y - w.y) }
+    function distToSegmentSquared(p, v, w) {
+        var l2 = dist2(v, w);
+        if (l2 == 0) return dist2(p, v);
+        var t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
+        t = Math.max(0, Math.min(1, t));
+        return dist2(p, { x: v.x + t * (w.x - v.x),
+                        y: v.y + t * (w.y - v.y) });
+    }
+    function distToSegment(p, v, w) { return Math.sqrt(distToSegmentSquared(p, v, w)); }
+    
+    // Quick check if point is near obstacle
+    function isPointNearPolygon(p, poly, margin) {
+        // This is a simplified check used in the main loop to see if we are "too close"
+        return getDistToPolyBoundary(p, poly) < margin;
+    }
+
+    function resetCanvas() {
+        landPoints = [];
+        obstacles = [];
+        currentObstacle = [];
+        trees = [];
+        draw();
+        document.getElementById('tree-count').innerText = "Trees: 0";
+    }
+
+</script>
+</body>
+</html>

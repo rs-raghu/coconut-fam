@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Coconut Planner V3 - Rotation Support</title>
+    <style>
+        :root { --primary: #2e7d32; --bg: #f4f7f6; --panel: #ffffff; --accent: #ff9800; }
+        body { font-family: 'Segoe UI', sans-serif; margin: 0; display: flex; height: 100vh; background: var(--bg); overflow: hidden; }
+        
+        /* Sidebar */
+        #controls {
+            width: 320px; background: var(--panel); padding: 15px; box-shadow: 2px 0 15px rgba(0,0,0,0.1);
+            display: flex; flex-direction: column; gap: 10px; overflow-y: auto; z-index: 10;
+        }
+        h2 { margin: 0 0 5px 0; color: var(--primary); font-size: 1.3rem; }
+        .section-title { font-size: 0.8rem; text-transform: uppercase; font-weight:bold; color: #555; margin-top: 10px; border-bottom: 2px solid #eee; padding-bottom: 2px; }
+        
+        button { padding: 8px; cursor: pointer; border: 1px solid #ddd; border-radius: 4px; background: white; font-weight: 600; font-size: 0.9rem; }
+        button:hover { background: #f0f0f0; }
+        button.primary { background: var(--primary); color: white; border: none; }
+        button.accent { background: var(--accent); color: white; border: none; }
+        
+        .row { display: flex; gap: 5px; }
+        .row button { flex: 1; }
+        input, select { padding: 6px; border: 1px solid #ddd; border-radius: 4px; width: 100%; box-sizing: border-box; }
+        
+        /* Stats & Sliders */
+        .stats { display: flex; justify-content: space-between; background: #e8f5e9; padding: 8px; border-radius: 4px; font-size: 0.9rem; }
+        input[type=range] { width: 100%; margin: 5px 0; }
+
+        /* Canvas */
+        #canvas-container { flex-grow: 1; position: relative; background: #333; overflow: hidden; display:flex; justify-content:center; align-items:center; }
+        canvas { box-shadow: 0 0 20px rgba(0,0,0,0.5); background: white; }
+        
+        #status-bar {
+            position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.7); color: white; padding: 5px 15px; border-radius: 20px; font-size: 0.9rem; pointer-events: none;
+        }
+        #fileInput { display: none; }
+    </style>
+</head>
+<body>
+
+<div id="controls">
+    <h2>🌴 Coconut V3</h2>
+    <div class="stats">
+        <span><b>Trees:</b> <span id="treeCount">0</span></span>
+        <span><b>Scale:</b> <span id="scaleDisplay">1px=1ft</span></span>
+    </div>
+
+    <div class="section-title">1. Map & Scale</div>
+    <button onclick="document.getElementById('fileInput').click()">📁 Upload Image</button>
+    <input type="file" id="fileInput" accept="image/*">
+    <button class="accent" id="btnCalibrate" onclick="setMode('calibrate')">📏 Calibrate (Set Scale)</button>
+
+    <div class="section-title">2. Draw Boundaries</div>
+    <div class="row">
+        <button id="btnLand" onclick="setMode('land')">Draw Land</button>
+        <button id="btnObs" onclick="setMode('obstacle')">Obstacle</button>
+    </div>
+    <div class="row">
+        <button onclick="undo()">↶ Undo</button>
+        <button onclick="resetAll()" style="color:red;">Clear</button>
+    </div>
+
+    <div class="section-title">3. Planting Config</div>
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:5px;">
+        <div>
+            <label style="font-size:0.8rem;">Spacing (ft)</label>
+            <input type="number" id="optDist" value="25" onchange="calculate()">
+        </div>
+        <div>
+            <label style="font-size:0.8rem;">Border (ft)</label>
+            <input type="number" id="borderDist" value="5" onchange="calculate()">
+        </div>
+    </div>
+    
+    <label style="font-size:0.8rem; margin-top:5px; display:block;">Grid Rotation: <span id="rotVal">0°</span></label>
+    <div class="row">
+        <button onclick="autoAlign()" style="font-size:0.8rem;">✨ Auto-Align Longest Side</button>
+    </div>
+    <input type="range" id="angleSlider" min="0" max="180" value="0" oninput="updateRotation(this.value)">
+
+    <button class="primary" style="margin-top:10px; padding:12px;" onclick="calculate()">🌱 RECALCULATE LAYOUT</button>
+</div>
+
+<div id="canvas-container">
+    <div id="status-bar">Mode: View</div>
+    <canvas id="c"></canvas>
+</div>
+
+<script>
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    const container = document.getElementById('canvas-container');
+
+    // STATE
+    let mode = 'view';
+    let scale = 1.0; // px per foot
+    let bgImage = null;
+    let imgOffset = {x:0, y:0, w:0, h:0}; // Image placement
+    
+    let landPoly = [];
+    let obstacles = [];
+    let activePoly = [];
+    let trees = [];
+    let gridAngle = 0; // Degrees
+
+    // INIT
+    function resize() {
+        // Fit canvas to container
+        canvas.width = container.clientWidth;
+        canvas.height = container.clientHeight;
+        fitImage();
+        render();
+    }
+    window.addEventListener('resize', resize);
+
+    // IMAGE LOADING (Fix for "Image not fitting")
+    document.getElementById('fileInput').addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if(!file) return;
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            bgImage = new Image();
+            bgImage.onload = () => {
+                fitImage();
+                render();
+            };
+            bgImage.src = event.target.result;
+        };
+        reader.readAsDataURL(file);
+    });
+
+    function fitImage() {
+        if(!bgImage) return;
+        // Calculate aspect ratio to "contain" image
+        const scaleW = canvas.width / bgImage.width;
+        const scaleH = canvas.height / bgImage.height;
+        const fitScale = Math.min(scaleW, scaleH) * 0.9; // 90% size to leave margin
+        
+        imgOffset.w = bgImage.width * fitScale;
+        imgOffset.h = bgImage.height * fitScale;
+        imgOffset.x = (canvas.width - imgOffset.w) / 2;
+        imgOffset.y = (canvas.height - imgOffset.h) / 2;
+    }
+
+    // INTERACTION
+    let mouse = {x:0, y:0};
+    canvas.addEventListener('mousemove', e => {
+        const r = canvas.getBoundingClientRect();
+        mouse.x = e.clientX - r.left;
+        mouse.y = e.clientY - r.top;
+        render();
+    });
+
+    canvas.addEventListener('mousedown', e => {
+        if(mode === 'view') return;
+        
+        // Calibration Logic
+        if(mode === 'calibrate') {
+            activePoly.push({x:mouse.x, y:mouse.y});
+            if(activePoly.length === 2) {
+                const pxDist = dist(activePoly[0], activePoly[1]);
+                const ft = prompt("Enter distance in FEET:", "100");
+                if(ft) {
+                    scale = pxDist / parseFloat(ft);
+                    document.getElementById('scaleDisplay').innerText = `1px = ${(1/scale).toFixed(2)}ft`;
+                }
+                activePoly = [];
+                setMode('view');
+            }
+        }
+        // Drawing Logic
+        else {
+            // Close loop check
+            if(activePoly.length > 2 && dist(mouse, activePoly[0]) < 15) {
+                if(mode === 'land') {
+                    landPoly = [...activePoly];
+                    // Auto-Align on finish
+                    autoAlign(); 
+                } else {
+                    obstacles.push([...activePoly]);
+                }
+                activePoly = [];
+                setMode('view');
+            } else {
+                activePoly.push({x:mouse.x, y:mouse.y});
+            }
+        }
+        render();
+    });
+
+    // HELPERS
+    function setMode(m) {
+        mode = m;
+        activePoly = [];
+        document.getElementById('status-bar').innerText = "Mode: " + m.toUpperCase();
+        ['btnLand','btnObs','btnCalibrate'].forEach(id => document.getElementById(id).style.border = '1px solid #ddd');
+        if(m!=='view') document.getElementById(m==='land'?'btnLand':m==='obstacle'?'btnObs':'btnCalibrate').style.border = '2px solid #2e7d32';
+        render();
+    }
+
+    function updateRotation(val) {
+        gridAngle = parseInt(val);
+        document.getElementById('rotVal').innerText = gridAngle + "°";
+        calculate(); // Realtime update
+    }
+
+    function undo() {
+        if(activePoly.length > 0) activePoly.pop();
+        else if(obstacles.length > 0) obstacles.pop();
+        else if(landPoly.length > 0) landPoly = [];
+        render();
+    }
+
+    function resetAll() {
+        landPoly = []; obstacles = []; trees = []; activePoly = [];
+        render();
+    }
+
+    // --- ALGORITHMS ---
+
+    // 1. AUTO ALIGN: Find longest edge of land
+    function autoAlign() {
+        if(landPoly.length < 2) return;
+        let maxDist = 0;
+        let angle = 0;
+        
+        for(let i=0; i<landPoly.length; i++) {
+            let p1 = landPoly[i];
+            let p2 = landPoly[(i+1)%landPoly.length];
+            let d = dist(p1, p2);
+            if(d > maxDist) {
+                maxDist = d;
+                // Calculate angle of this edge
+                let theta = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+                angle = theta * (180/Math.PI);
+            }
+        }
+        // Normalize angle
+        if(angle < 0) angle += 180;
+        if(angle > 180) angle -= 180;
+        
+        gridAngle = Math.round(angle);
+        document.getElementById('angleSlider').value = gridAngle;
+        document.getElementById('rotVal').innerText = gridAngle + "°";
+        calculate();
+    }
+
+    // 2. CALCULATE POSITIONS
+    function calculate() {
+        if(landPoly.length < 3) return;
+        
+        const optDist = parseFloat(document.getElementById('optDist').value) * scale;
+        const borderDist = parseFloat(document.getElementById('borderDist').value) * scale;
+        trees = [];
+
+        // Rotation Logic:
+        // We cannot just rotate the grid. It's easier to:
+        // 1. Rotate the Land Polygon so it sits flat (Angle 0).
+        // 2. Generate standard grid points.
+        // 3. Rotate those points BACK to the original angle.
+
+        const rad = -gridAngle * (Math.PI / 180); // Negative to rotate land "flat"
+        
+        // Find center to rotate around
+        let cx=0, cy=0;
+        landPoly.forEach(p=>{cx+=p.x; cy+=p.y});
+        cx /= landPoly.length; cy /= landPoly.length;
+
+        function rotatePoint(p, angleRad) {
+            let cos = Math.cos(angleRad), sin = Math.sin(angleRad);
+            let dx = p.x - cx, dy = p.y - cy;
+            return {
+                x: cx + (dx*cos - dy*sin),
+                y: cy + (dx*sin + dy*cos)
+            };
+        }
+
+        // Create "Virtual" Rotated Polygon
+        let flatPoly = landPoly.map(p => rotatePoint(p, rad));
+        let flatObs = obstacles.map(obs => obs.map(p => rotatePoint(p, rad)));
+
+        // Get bounds of flat polygon
+        let minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity;
+        flatPoly.forEach(p => {
+            minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+            minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+        });
+
+        // Generate Grid on Flat Space
+        const rowH = optDist * 0.866; // Triangular height
+        let rowIdx = 0;
+        
+        for(let y = minY; y <= maxY; y += rowH) {
+            let offset = (rowIdx % 2 !== 0) ? optDist/2 : 0;
+            for(let x = minX - optDist + offset; x <= maxX; x += optDist) {
+                let flatP = {x, y};
+
+                // Check collisions in Flat Space
+                if(isInside(flatP, flatPoly)) {
+                    // Check border dist
+                    if(minDistToPoly(flatP, flatPoly) >= borderDist) {
+                        // Check obstacles
+                        let hitObs = false;
+                        for(let obs of flatObs) {
+                            if(isInside(flatP, obs) || minDistToPoly(flatP, obs) < borderDist) {
+                                hitObs = true; break;
+                            }
+                        }
+                        if(!hitObs) {
+                            // Valid! Rotate BACK to real world
+                            trees.push(rotatePoint(flatP, -rad));
+                        }
+                    }
+                }
+            }
+            rowIdx++;
+        }
+        document.getElementById('treeCount').innerText = trees.length;
+        render();
+    }
+
+    // --- RENDERER ---
+    function render() {
+        ctx.fillStyle = '#333';
+        ctx.fillRect(0,0,canvas.width,canvas.height);
+
+        // 1. Draw Image
+        if(bgImage) {
+            ctx.drawImage(bgImage, imgOffset.x, imgOffset.y, imgOffset.w, imgOffset.h);
+        }
+
+        // 2. Polygons
+        if(landPoly.length>0) drawPoly(landPoly, 'rgba(46,125,50,0.3)', '#2e7d32', true);
+        obstacles.forEach(o => drawPoly(o, 'rgba(200,0,0,0.4)', 'red', true));
+        if(activePoly.length>0) drawPoly(activePoly, 'rgba(255,255,255,0.2)', 'white', false);
+
+        // Active Line
+        if(activePoly.length>0) {
+            let last = activePoly[activePoly.length-1];
+            ctx.beginPath(); ctx.moveTo(last.x, last.y); ctx.lineTo(mouse.x, mouse.y);
+            ctx.strokeStyle='white'; ctx.stroke();
+            // Tooltip
+            let d = dist(last, mouse);
+            ctx.fillStyle='white'; ctx.fillText(((d/scale).toFixed(1))+" ft", mouse.x+10, mouse.y);
+        }
+
+        // 3. Trees
+        trees.forEach(t => {
+            ctx.beginPath();
+            ctx.arc(t.x, t.y, 3, 0, Math.PI*2);
+            ctx.fillStyle = '#76ff03'; // Bright green for contrast
+            ctx.fill();
+        });
+    }
+
+    function drawPoly(pts, fill, str, close) {
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i].x, pts[i].y);
+        if(close) ctx.closePath();
+        ctx.fillStyle=fill; ctx.fill();
+        ctx.strokeStyle=str; ctx.lineWidth=2; ctx.stroke();
+        pts.forEach(p=>{
+            ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI*2); ctx.fillStyle=str; ctx.fill();
+        })
+    }
+
+    // MATH
+    function dist(a,b){ return Math.sqrt((a.x-b.x)**2+(a.y-b.y)**2); }
+    function isInside(p, poly) {
+        let inside = false;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+            let xi = poly[i].x, yi = poly[i].y;
+            let xj = poly[j].x, yj = poly[j].y;
+            let intersect = ((yi > p.y) != (yj > p.y)) && (p.x < (xj - xi) * (p.y - yi) / (yj - yi) + xi);
+            if (intersect) inside = !inside;
+        }
+        return inside;
+    }
+    function minDistToPoly(p, poly) {
+        let minD = Infinity;
+        for(let i=0; i<poly.length; i++) {
+            let j = (i+1)%poly.length;
+            let d = distToSeg(p, poly[i], poly[j]);
+            if(d < minD) minD = d;
+        }
+        return minD;
+    }
+    function distToSeg(p, v, w) {
+        const l2 = (v.x-w.x)**2 + (v.y-w.y)**2;
+        if(l2 === 0) return dist(p, v);
+        let t = ((p.x-v.x)*(w.x-v.x) + (p.y-v.y)*(w.y-v.y)) / l2;
+        t = Math.max(0, Math.min(1, t));
+        return dist(p, { x: v.x + t * (w.x - v.x), y: v.y + t * (w.y - v.y) });
+    }
+</script>
+</body>
+</html>
